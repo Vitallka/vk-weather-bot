@@ -1,12 +1,15 @@
 /**
- * Бот «Погода на завтра» для группы ВКонтакте.
+ * Боты «Погода на завтра» для групп ВКонтакте — поддерживает НЕСКОЛЬКО групп.
  *
- * Источник погоды — Open-Meteo (бесплатный, ключ не нужен).
+ * Настройки берутся из .env (локально) или переменных окружения (GitHub Actions):
+ *   Бот 1: VK_TOKEN,     VK_GROUP_ID,     CITY     (или LAT/LON)
+ *   Бот 2: VK_TOKEN_2,   VK_GROUP_ID_2,   CITY_2   (или LAT_2/LON_2)
+ *   Бот 3–5: аналогично с суффиксом _3, _4, _5
  *
  * Режимы запуска:
- *   node index.js --test   показать текст поста в консоли (ничего не публикует)
- *   node index.js --now    опубликовать пост прямо сейчас
- *   node index.js          запустить по расписанию (CRON из .env, по умолчанию 08:00 каждый день)
+ *   node index.js --test   показать тексты постов всех ботов, ничего не публикуя
+ *   node index.js --now    опубликовать посты во все группы прямо сейчас
+ *   node index.js          по расписанию (CRON из .env; на GitHub время задаётся в workflow)
  */
 
 require('dotenv').config();
@@ -14,11 +17,6 @@ const cron = require('node-cron');
 
 // ----------------------------- Конфигурация -----------------------------
 
-const CITY = process.env.CITY || 'Москва';
-const LAT = process.env.LAT;
-const LON = process.env.LON;
-const VK_GROUP_ID = (process.env.VK_GROUP_ID || '').replace(/[^\d-]/g, '');
-const VK_TOKEN = process.env.VK_TOKEN || '';
 const CRON_EXPR = process.env.CRON || '0 8 * * *';
 const TZ_NAME = process.env.TZ_NAME || undefined;
 const VK_API_VERSION = '5.199';
@@ -39,7 +37,7 @@ async function geocode(city) {
   const json = await res.json();
   const place = json.results && json.results[0];
   if (!place) {
-    throw new Error(`Город «${city}» не найден. Проверьте написание или задайте LAT/LON в .env`);
+    throw new Error(`Город «${city}» не найден. Проверьте написание или задайте LAT/LON`);
   }
   return { name: place.name, lat: place.latitude, lon: place.longitude };
 }
@@ -150,11 +148,11 @@ function buildMessage(place, daily, i) {
   return lines.join('\n');
 }
 
-/** Возвращает готовый текст поста (геокодирует город, если нужно). */
-async function getTomorrowMessage() {
-  const place = (LAT && LON)
-    ? { name: CITY, lat: LAT, lon: LON }
-    : await geocode(CITY);
+/** Возвращает готовый текст поста для конкретного бота. */
+async function buildPostForBot(bot) {
+  const place = (bot.lat && bot.lon)
+    ? { name: bot.city, lat: bot.lat, lon: bot.lon }
+    : await geocode(bot.city);
   const daily = await fetchForecast(place.lat, place.lon);
   if (daily.time.length < 2) {
     throw new Error('Прогноз на завтра пока недоступен, попробуйте позже');
@@ -165,16 +163,16 @@ async function getTomorrowMessage() {
 // ----------------------------- ВКонтакте -----------------------------
 
 /** Публикует сообщение на стене группы, возвращает id поста. */
-async function postToVk(message) {
-  if (!VK_GROUP_ID) throw new Error('Не задан VK_GROUP_ID (в bot/.env или в переменной окружения / Secrets)');
-  if (!VK_TOKEN) throw new Error('Не задан VK_TOKEN (в bot/.env или в переменной окружения / Secrets)');
+async function postToVk(message, groupId, token) {
+  if (!groupId) throw new Error('Не задан ID группы');
+  if (!token) throw new Error('Не задан токен группы');
 
   const body = new URLSearchParams({
-    owner_id: '-' + VK_GROUP_ID.replace(/^-/, ''),
+    owner_id: '-' + String(groupId).replace(/[^\d]/g, ''),
     from_group: '1',
     message,
     v: VK_API_VERSION,
-    access_token: VK_TOKEN,
+    access_token: token,
   });
 
   const res = await fetch('https://api.vk.com/method/wall.post', { method: 'POST', body });
@@ -182,7 +180,7 @@ async function postToVk(message) {
   if (json.error) {
     const { error_code, error_msg } = json.error;
     let hint = '';
-    if (error_code === 5) hint = ' (проверьте VK_TOKEN — он неверный или истёк)';
+    if (error_code === 5) hint = ' (проверьте токен — он неверный или истёк)';
     if (error_code === 15) hint = ' (у токена нет права «Работа со стеной» / wall)';
     if (error_code === 27) hint = ' (группа не разрешает публикацию с ключом сообщества)';
     throw new Error(`Ошибка VK API ${error_code}: ${error_msg}${hint}`);
@@ -190,10 +188,52 @@ async function postToVk(message) {
   return json.response.post_id;
 }
 
-async function publish() {
-  const message = await getTomorrowMessage();
-  const postId = await postToVk(message);
-  console.log(`✅ Пост опубликован (id ${postId})`);
+// ----------------------------- Конфигурация ботов -----------------------------
+
+/** Собирает список ботов из переменных окружения: бот 1 — без суффикса, бот 2-5 — с _2.._5. */
+function collectBots() {
+  const bots = [];
+  for (let n = 1; n <= 5; n++) {
+    const sfx = n === 1 ? '' : '_' + n;
+    const token = process.env['VK_TOKEN' + sfx];
+    const groupId = process.env['VK_GROUP_ID' + sfx];
+    if (!token || !groupId) continue;
+    bots.push({
+      label: `Бот ${n}`,
+      token,
+      groupId,
+      city: process.env['CITY' + sfx] || 'Москва',
+      lat: process.env['LAT' + sfx],
+      lon: process.env['LON' + sfx],
+    });
+  }
+  return bots;
+}
+
+/** Прогоняет всех ботов. mode: 'test' — только показать, 'now' — опубликовать. */
+async function runAll(mode) {
+  const bots = collectBots();
+  if (!bots.length) {
+    throw new Error('Не настроен ни один бот: нужны VK_TOKEN и VK_GROUP_ID (.env или Secrets)');
+  }
+  let hadError = false;
+  for (const bot of bots) {
+    try {
+      const message = await buildPostForBot(bot);
+      if (mode === 'test') {
+        console.log(`——— ${bot.label}: ${bot.city} (группа ${bot.groupId}) ———`);
+        console.log(message);
+        console.log();
+      } else {
+        const postId = await postToVk(message, bot.groupId, bot.token);
+        console.log(`✅ ${bot.label} (${bot.city}, группа ${bot.groupId}): пост опубликован (id ${postId})`);
+      }
+    } catch (err) {
+      hadError = true;
+      console.error(`❌ ${bot.label} (${bot.city}, группа ${bot.groupId}): ${err.message}`);
+    }
+  }
+  if (hadError) process.exitCode = 1;
 }
 
 // ----------------------------- Запуск -----------------------------
@@ -202,24 +242,25 @@ async function main() {
   const mode = process.argv[2] || '';
 
   if (mode === '--test') {
-    console.log(await getTomorrowMessage());
-    return;
+    return runAll('test');
   }
 
   if (mode === '--now') {
-    await publish();
-    return;
+    return runAll('now');
   }
 
   // Режим расписания
   if (!cron.validate(CRON_EXPR)) {
-    throw new Error(`Некорректное CRON-выражение в .env: "${CRON_EXPR}"`);
+    throw new Error(`Некорректное CRON-выражение: "${CRON_EXPR}"`);
   }
-  console.log(`🕒 Бот запущен. Город: ${CITY}. Расписание: ${CRON_EXPR}${TZ_NAME ? ' (' + TZ_NAME + ')' : ''}`);
-  console.log('   Для проверки без публикации: npm test');
-  console.log('   Для разовой публикации:      npm run post:now');
+  const bots = collectBots();
+  if (!bots.length) {
+    throw new Error('Не настроен ни один бот: нужны VK_TOKEN и VK_GROUP_ID (.env или Secrets)');
+  }
+  const cities = bots.map((b) => b.city).join(', ');
+  console.log(`🕒 Запущено ботов: ${bots.length} (${cities}). Расписание: ${CRON_EXPR}${TZ_NAME ? ' (' + TZ_NAME + ')' : ''}`);
   cron.schedule(CRON_EXPR, () => {
-    publish().catch((err) => console.error('❌', err.message));
+    runAll('now').catch((err) => console.error('❌', err.message));
   }, { timezone: TZ_NAME });
 }
 

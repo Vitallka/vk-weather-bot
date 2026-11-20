@@ -42,11 +42,26 @@ jobs:
       - name: Погода и публикация
         env:
           # Значения берутся из Secrets репозитория (Settings → Secrets and variables → Actions)
+          # Бот 1 — без суффикса, боты 2-5 — с суффиксом _2, _3, _4, _5
           VK_TOKEN: ${{ secrets.VK_TOKEN }}
           VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
           CITY: ${{ secrets.CITY }}
           LAT: ${{ secrets.LAT }}
           LON: ${{ secrets.LON }}
+          VK_TOKEN_2: ${{ secrets.VK_TOKEN_2 }}
+          VK_GROUP_ID_2: ${{ secrets.VK_GROUP_ID_2 }}
+          CITY_2: ${{ secrets.CITY_2 }}
+          LAT_2: ${{ secrets.LAT_2 }}
+          LON_2: ${{ secrets.LON_2 }}
+          VK_TOKEN_3: ${{ secrets.VK_TOKEN_3 }}
+          VK_GROUP_ID_3: ${{ secrets.VK_GROUP_ID_3 }}
+          CITY_3: ${{ secrets.CITY_3 }}
+          VK_TOKEN_4: ${{ secrets.VK_TOKEN_4 }}
+          VK_GROUP_ID_4: ${{ secrets.VK_GROUP_ID_4 }}
+          CITY_4: ${{ secrets.CITY_4 }}
+          VK_TOKEN_5: ${{ secrets.VK_TOKEN_5 }}
+          VK_GROUP_ID_5: ${{ secrets.VK_GROUP_ID_5 }}
+          CITY_5: ${{ secrets.CITY_5 }}
         run: |
           if [ "${{ github.event.inputs.mode }}" = "test" ]; then
             echo "=== ТЕСТ (без публикации) ==="
