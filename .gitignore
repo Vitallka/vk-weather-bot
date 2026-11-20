@@ -1,0 +1,10 @@
+# Секреты никогда не попадают в git
+.env
+bot/.env
+
+# Зависимости
+node_modules/
+
+# Служебное
+.DS_Store
+Thumbs.db

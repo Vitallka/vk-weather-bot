@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Погода на завтра</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/@vkontakte/vk-bridge/dist/browser.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <h1>Погода на завтра</h1>
+      <div class="city-search">
+        <input id="city-input" type="text" placeholder="Введите город…" autocomplete="off">
+        <button id="city-btn" aria-label="Найти">🔍</button>
+      </div>
+    </header>
+
+    <main id="content">
+      <div class="loading">Загружаем прогноз…</div>
+    </main>
+
+    <button id="share-btn" class="share-btn" hidden>📤 Поделиться прогнозом</button>
+
+    <footer class="footer">Данные: Open-Meteo · сделано для ВКонтакте</footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

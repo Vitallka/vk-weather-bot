@@ -1,0 +1,56 @@
+name: Погода на завтра — автопостинг
+
+# Пост публикуется на серверах GitHub — ваш компьютер может быть выключен.
+# ВАЖНО: время в расписании указано в UTC (Москва = UTC+3).
+# 10 5 * * * = 05:10 UTC = 08:10 по Москве, каждый день.
+on:
+  schedule:
+    - cron: "10 5 * * *"
+  # Ручной запуск из вкладки Actions на GitHub
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Режим"
+        required: true
+        default: "post"
+        type: choice
+        options:
+          - post
+          - test
+
+permissions:
+  contents: read
+
+jobs:
+  post-weather:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bot
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Установить Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Установить зависимости
+        run: npm ci
+
+      - name: Погода и публикация
+        env:
+          # Значения берутся из Secrets репозитория (Settings → Secrets and variables → Actions)
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          CITY: ${{ secrets.CITY }}
+          LAT: ${{ secrets.LAT }}
+          LON: ${{ secrets.LON }}
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "test" ]; then
+            echo "=== ТЕСТ (без публикации) ==="
+            node index.js --test
+          else
+            node index.js --now
+          fi

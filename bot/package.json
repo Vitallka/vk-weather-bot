@@ -1,0 +1,16 @@
+{
+  "name": "vk-weather-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Публикует прогноз погоды на завтра в группе ВКонтакте",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "post:now": "node index.js --now",
+    "test": "node index.js --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3"
+  }
+}
