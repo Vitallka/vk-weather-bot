@@ -11,7 +11,11 @@
  *   node index.js --now        опубликовать посты во все группы прямо сейчас
  *   node index.js --scheduled  пост по расписанию GitHub: до POST_TIME (19:00 МСК)
  *                              ещё далеко (> 12 ч) — пропуск; иначе — отложенный пост
- *                              ровно на 19:00; после 19:00 — публикация сразу
+ *                              ровно на 19:00; после 19:00 — публикация сразу.
+ *                              Перед публикацией бот проверяет стену группы (wall.get):
+ *                              если пост на сегодня уже есть или запланирован —
+ *                              запуск пропускается. Поэтому в workflow можно
+ *                              ставить несколько запасных cron'ов без риска дублей
  *   node index.js              по расписанию (CRON из .env; на GitHub время задаётся в workflow)
  */
 
@@ -30,8 +34,12 @@ const VK_API_VERSION = '5.199';
 //                                 вчерашнего запуска, пост сделает плановый запуск дня;
 //   до POST_TIME <= 12 часов     — создаётся отложенный пост (publish_date) ровно на POST_TIME;
 //   POST_TIME уже прошло         — пост публикуется сразу (лучше позже, чем никак).
-// ВАЖНО: время cron в .github/workflows/weather-post.yml должно попадать в окно
-// отсрочки (сейчас cron в 14:15 МСК — до 19:00 остаётся 4 ч 45 мин).
+// Дополнительно (см. .github/workflows/weather-post.yml): schedule в GitHub Actions —
+// «best effort», запуски могут теряться целиком. Поэтому workflow запускается
+// несколько раз в день (основной запуск + страховки), а этот бот проверяет стену
+// группы перед публикацией и не дублирует пост, если он уже создан/вышел.
+// ВАЖНО: время каждого cron в .github/workflows/weather-post.yml должно попадать
+// в окно отсрочки (сейчас основной cron в 14:15 МСК — до 19:00 остаётся 4 ч 45 мин).
 const POST_TIME_MSK = process.env.POST_TIME || '19:00';
 const DEFER_WINDOW_MS = 12 * 60 * 60 * 1000;
 
@@ -232,6 +240,52 @@ async function postToVk(message, groupId, token, publishDate) {
   return json.response.post_id;
 }
 
+/** Возвращает записи со стены группы.
+ * filter: 'postponed' — отложенные записи, 'owner' — опубликованные владельцем. */
+async function getWallPosts(groupId, token, filter, count = 20) {
+  const body = new URLSearchParams({
+    owner_id: groupOwnerId(groupId),
+    count: String(count),
+    filter,
+    v: VK_API_VERSION,
+    access_token: token,
+  });
+  const res = await fetch('https://api.vk.com/method/wall.get', { method: 'POST', body });
+  const json = await res.json();
+  if (json.error) {
+    throw new Error(`Ошибка VK API ${json.error.error_code}: ${json.error.error_msg}`);
+  }
+  return (json.response && json.response.items) || [];
+}
+
+/** Ищет уже созданный пост этого бота на сегодня (по МСК):
+ *  отложенный на сегодня или опубликованный сегодня пост с хэштегом #погода.
+ *  Возвращает { kind: 'postponed' | 'published', postId } или null.
+ *  Нужно, чтобы запасные запуски GitHub Actions не дублировали пост. */
+async function findTodayPost(groupId, token) {
+  const MSK_OFFSET_MS = 3 * 60 * 60 * 1000; // Москва = UTC+3, без перехода на летнее время
+  const mskNow = new Date(Date.now() + MSK_OFFSET_MS);
+  const dayStartMs = Date.UTC(mskNow.getUTCFullYear(), mskNow.getUTCMonth(),
+    mskNow.getUTCDate()) - MSK_OFFSET_MS;
+  const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+
+  const postponed = await getWallPosts(groupId, token, 'postponed');
+  for (const p of postponed) {
+    const at = (p.publish_date || 0) * 1000;
+    if (at >= dayStartMs && at < dayEndMs) {
+      return { kind: 'postponed', postId: p.id };
+    }
+  }
+
+  const recent = await getWallPosts(groupId, token, 'owner', 10);
+  for (const p of recent) {
+    if (p.date * 1000 >= dayStartMs && (p.text || '').includes('#погода')) {
+      return { kind: 'published', postId: p.id };
+    }
+  }
+  return null;
+}
+
 // ----------------------------- Конфигурация ботов -----------------------------
 
 /** Собирает список ботов из переменных окружения: бот 1 — без суффикса, бот 2-5 — с _2.._5. */
@@ -255,7 +309,9 @@ function collectBots() {
 }
 
 /** Прогоняет всех ботов. mode: 'test' — только показать,
- *  'now' — опубликовать сразу, 'scheduled' — отложить до POST_TIME_MSK. */
+ *  'now' — опубликовать сразу, 'scheduled' — отложить до POST_TIME_MSK.
+ *  В режиме 'scheduled' перед публикацией проверяется стена группы:
+ *  если пост на сегодня уже создан/вышел — бот пропускается (защита от дублей). */
 async function runAll(mode) {
   const bots = collectBots();
   if (!bots.length) {
@@ -271,6 +327,25 @@ async function runAll(mode) {
   let hadError = false;
   for (const bot of bots) {
     try {
+      // Защита от дублей для запусков по расписанию (включая запасные cron'ы):
+      // если пост на сегодня уже есть или запланирован — этот бот пропускается
+      if (mode === 'scheduled') {
+        let existing = null;
+        try {
+          existing = await findTodayPost(bot.groupId, bot.token);
+        } catch (err) {
+          console.warn(`⚠️ ${bot.label}: не удалось проверить стену группы ` +
+            `(${err.message}) — публикую без проверки на дубль`);
+        }
+        if (existing) {
+          const when = existing.kind === 'postponed'
+            ? 'отложенный пост на сегодня уже создан'
+            : 'сегодняшний пост уже опубликован';
+          console.log(`⏭ ${bot.label} (${bot.city}, группа ${bot.groupId}): ` +
+            `${when} (id ${existing.postId}) — этот запуск пропущен`);
+          continue;
+        }
+      }
       const message = await buildPostForBot(bot);
       if (mode === 'test') {
         console.log(`——— ${bot.label}: ${bot.city} (группа ${bot.groupId}) ———`);
@@ -323,7 +398,7 @@ async function main() {
   }, { timezone: TZ_NAME });
 }
 
-main().catch((err) => {
+module.exports = main().catch((err) => {
   console.error('❌', err.message);
   process.exit(1);
 });
