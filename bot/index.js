@@ -7,9 +7,12 @@
  *   Бот 3–5: аналогично с суффиксом _3, _4, _5
  *
  * Режимы запуска:
- *   node index.js --test   показать тексты постов всех ботов, ничего не публикуя
- *   node index.js --now    опубликовать посты во все группы прямо сейчас
- *   node index.js          по расписанию (CRON из .env; на GitHub время задаётся в workflow)
+ *   node index.js --test       показать тексты постов всех ботов, ничего не публикуя
+ *   node index.js --now        опубликовать посты во все группы прямо сейчас
+ *   node index.js --scheduled  пост по расписанию GitHub: до POST_TIME (19:00 МСК)
+ *                              ещё далеко — пропуск; меньше 2 часов — отложенный пост
+ *                              ровно на 19:00; после — публикация сразу
+ *   node index.js              по расписанию (CRON из .env; на GitHub время задаётся в workflow)
  */
 
 require('dotenv').config();
@@ -20,6 +23,14 @@ const cron = require('node-cron');
 const CRON_EXPR = process.env.CRON || '0 8 * * *';
 const TZ_NAME = process.env.TZ_NAME || undefined;
 const VK_API_VERSION = '5.199';
+
+// Время выхода поста в режиме --scheduled (по Москве, ЧЧ:ММ).
+// GitHub Actions может запустить workflow с задержкой, поэтому:
+//   до POST_TIME ещё > 2 часов  — запуск пропускается (пост сделает плановый вечерний);
+//   до POST_TIME < 2 часов      — создаётся отложенный пост (publish_date) ровно на POST_TIME;
+//   POST_TIME уже прошло        — пост публикуется сразу (лучше позже, чем никак).
+const POST_TIME_MSK = process.env.POST_TIME || '19:00';
+const DEFER_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 const MONTHS_RU = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
   'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
@@ -160,20 +171,50 @@ async function buildPostForBot(bot) {
   return buildMessage(place, daily, 1);
 }
 
+// ----------------------------- Отложенная публикация -----------------------------
+
+/**
+ * Решение для режима --scheduled: skip / defer / now (см. комментарий к POST_TIME_MSK).
+ */
+function computePublishPlan() {
+  const match = POST_TIME_MSK.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
+    console.warn(`⚠️ Некорректное POST_TIME «${POST_TIME_MSK}» — публикация без отсрочки`);
+    return { action: 'now' };
+  }
+  const MSK_OFFSET_MS = 3 * 60 * 60 * 1000; // Москва = UTC+3, без перехода на летнее время
+  const nowMs = Date.now();
+  const mskNow = new Date(nowMs + MSK_OFFSET_MS);
+  // Сегодняшние ЧЧ:ММ по Москве, переведённые в миллисекунды UTC
+  const targetMs = Date.UTC(mskNow.getUTCFullYear(), mskNow.getUTCMonth(),
+    mskNow.getUTCDate(), Number(match[1]), Number(match[2]), 0) - MSK_OFFSET_MS;
+  const msLeft = targetMs - nowMs;
+  if (msLeft > DEFER_WINDOW_MS) return { action: 'skip' };
+  if (msLeft <= 60 * 1000) return { action: 'now' };
+  return { action: 'defer', unix: Math.floor(targetMs / 1000), label: POST_TIME_MSK };
+}
+
 // ----------------------------- ВКонтакте -----------------------------
 
-/** Публикует сообщение на стене группы, возвращает id поста. */
-async function postToVk(message, groupId, token) {
+/** Нормализует ID группы в формат owner_id (-123456). */
+function groupOwnerId(groupId) {
+  return '-' + String(groupId).replace(/[^\d]/g, '');
+}
+
+/** Публикует сообщение на стене группы, возвращает id поста.
+ * publishDate — необязательное время (Unix): пост выйдет в ленту в этот момент. */
+async function postToVk(message, groupId, token, publishDate) {
   if (!groupId) throw new Error('Не задан ID группы');
   if (!token) throw new Error('Не задан токен группы');
 
   const body = new URLSearchParams({
-    owner_id: '-' + String(groupId).replace(/[^\d]/g, ''),
+    owner_id: groupOwnerId(groupId),
     from_group: '1',
     message,
     v: VK_API_VERSION,
     access_token: token,
   });
+  if (publishDate) body.set('publish_date', String(publishDate));
 
   const res = await fetch('https://api.vk.com/method/wall.post', { method: 'POST', body });
   const json = await res.json();
@@ -210,12 +251,20 @@ function collectBots() {
   return bots;
 }
 
-/** Прогоняет всех ботов. mode: 'test' — только показать, 'now' — опубликовать. */
+/** Прогоняет всех ботов. mode: 'test' — только показать,
+ *  'now' — опубликовать сразу, 'scheduled' — отложить до POST_TIME_MSK. */
 async function runAll(mode) {
   const bots = collectBots();
   if (!bots.length) {
     throw new Error('Не настроен ни один бот: нужны VK_TOKEN и VK_GROUP_ID (.env или Secrets)');
   }
+  const plan = mode === 'scheduled' ? computePublishPlan() : { action: 'now' };
+  if (plan.action === 'skip') {
+    console.log(`⏭ До ${POST_TIME_MSK} МСК ещё далеко — этот запуск пропущен. ` +
+      `Плановый вечерний запуск создаст пост точно к ${POST_TIME_MSK}.`);
+    return;
+  }
+  const defer = plan.action === 'defer' ? plan : null;
   let hadError = false;
   for (const bot of bots) {
     try {
@@ -225,8 +274,11 @@ async function runAll(mode) {
         console.log(message);
         console.log();
       } else {
-        const postId = await postToVk(message, bot.groupId, bot.token);
-        console.log(`✅ ${bot.label} (${bot.city}, группа ${bot.groupId}): пост опубликован (id ${postId})`);
+        const postId = await postToVk(message, bot.groupId, bot.token, defer ? defer.unix : null);
+        const when = defer
+          ? `пост выйдет в ленту в ${defer.label} МСК (отложен, id ${postId})`
+          : `пост опубликован (id ${postId})`;
+        console.log(`✅ ${bot.label} (${bot.city}, группа ${bot.groupId}): ${when}`);
       }
     } catch (err) {
       hadError = true;
@@ -247,6 +299,10 @@ async function main() {
 
   if (mode === '--now') {
     return runAll('now');
+  }
+
+  if (mode === '--scheduled') {
+    return runAll('scheduled');
   }
 
   // Режим расписания
