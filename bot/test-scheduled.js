@@ -1,6 +1,8 @@
-// Мок-тест режима --scheduled: проверяет дедупликацию и создание отложенного поста.
+// Мок-тест режима --scheduled: проверяет дедупликацию (маркер GitHub и стена
+// группы), создание отложенного поста и файл-маркер.
 // Запуск: node test-scheduled.js
 const path = require('path');
+const fs = require('fs');
 
 let wallPostCalls = [];
 let wallPostArgs = null;
@@ -9,9 +11,12 @@ let wallPostArgs = null;
 const MSK = 3 * 60 * 60 * 1000;
 const msk = new Date(Date.now() + MSK);
 const today19 = Date.UTC(msk.getUTCFullYear(), msk.getUTCMonth(), msk.getUTCDate(), 16, 0, 0) / 1000;
+const todayStr = new Date(Date.now() + MSK).toISOString().slice(0, 10);
 
 // Сценарии поведения стены
 let scenario = 'empty'; // 'empty' | 'postponed' | 'published'
+// Сценарии маркера GitHub: true — артефакт есть, false — нет
+let ghMarker = false;
 
 const realFetch = global.fetch;
 
@@ -21,6 +26,13 @@ Date.now = () => FIXED_NOW;
 
 global.fetch = async (url, opts) => {
   const u = String(url);
+  if (u.includes('api.github.com')) {
+    // Список артефактов-маркеров posted-<дата>-bot<N>
+    const wanted = u.match(/name=posted-(\d{4}-\d{2}-\d{2})-bot(\d+)/);
+    if (!wanted) return realFetch(url, opts);
+    const items = ghMarker ? [{ id: 1, name: decodeURIComponent(wanted[0].slice(5)), expired: false }] : [];
+    return { ok: true, json: async () => ({ total_count: items.length, artifacts: items }) };
+  }
   if (u.includes('wall.get')) {
     const body = new URLSearchParams(opts.body);
     if (body.get('filter') === 'postponed') {
@@ -83,8 +95,9 @@ async function run() {
 }
 
 (async () => {
-  // 1. Стена пуста → должен создать ОТЛОЖЕННЫЙ пост на 19:00
+  // 1. Стена пуста, маркера нет → должен создать ОТЛОЖЕННЫЙ пост на 19:00
   scenario = 'empty';
+  ghMarker = false;
   await run();
   if (wallPostCalls.length !== 1) throw new Error('FAIL: ожидался 1 вызов wall.post, было ' + wallPostCalls.length);
   if (!wallPostArgs.publish_date) throw new Error('FAIL: publish_date не передан');
@@ -104,6 +117,40 @@ async function run() {
   await run();
   if (wallPostCalls.length !== 0) throw new Error('FAIL: wall.post вызван при вышедшем посте!');
   console.log('>>> OK: дубли не созданы (пост уже опубликован, wall.post не вызывался)');
+
+  // 4. Маркер GitHub: артефакт posted-<сегодня>-bot1 есть → пропуск без публикации
+  wallPostCalls = [];
+  scenario = 'empty';
+  process.env.GH_TOKEN = 'test-token';
+  process.env.GH_REPO = 'octo/repo';
+  ghMarker = true;
+  await run();
+  if (wallPostCalls.length !== 0) throw new Error('FAIL: wall.post вызван при артефакте-маркере!');
+  console.log('>>> OK: дубли не созданы (маркер GitHub, wall.post не вызывался)');
+
+  // 5. Маркера нет, GH настроен → пост публикуется и создаётся файл-маркер
+  wallPostCalls = [];
+  ghMarker = false;
+  const markerFile = path.join(__dirname, 'markers', 'posted-bot1.txt');
+  await run();
+  if (wallPostCalls.length !== 1) throw new Error('FAIL: ожидался 1 вызов wall.post, было ' + wallPostCalls.length);
+  if (!fs.existsSync(markerFile)) throw new Error('FAIL: файл-маркер markers/posted-bot1.txt не создан');
+  const markerVal = fs.readFileSync(markerFile, 'utf8').trim();
+  if (markerVal !== todayStr) throw new Error(`FAIL: в файле-маркере «${markerVal}», ожидалось «${todayStr}»`);
+  console.log(`>>> OK: пост опубликован, файл-маркер создан (${markerVal})`);
+
+  // 6. --force пропускает проверку дублей даже при маркере
+  wallPostCalls = [];
+  ghMarker = true;
+  process.argv = [process.argv[0], path.join(__dirname, 'index.js'), '--scheduled', '--force'];
+  await run();
+  if (wallPostCalls.length !== 1) throw new Error('FAIL: --force не обошёл проверку дублей!');
+  console.log('>>> OK: --force публикует даже при маркере');
+
+  // уборка
+  fs.rmSync(path.join(__dirname, 'markers'), { recursive: true, force: true });
+  delete process.env.GH_TOKEN;
+  delete process.env.GH_REPO;
 
   console.log('\nВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ✅');
 })().catch((e) => { console.error('❌', e.message); process.exit(1); });

@@ -9,13 +9,16 @@
  * Режимы запуска:
  *   node index.js --test       показать тексты постов всех ботов, ничего не публикуя
  *   node index.js --now        опубликовать посты во все группы прямо сейчас
+ *                              (--now --force — пропустить проверку дублей)
  *   node index.js --scheduled  пост по расписанию GitHub: до POST_TIME (19:00 МСК)
  *                              ещё далеко (> 12 ч) — пропуск; иначе — отложенный пост
  *                              ровно на 19:00; после 19:00 — публикация сразу.
- *                              Перед публикацией бот проверяет стену группы (wall.get):
- *                              если пост на сегодня уже есть или запланирован —
- *                              запуск пропускается. Поэтому в workflow можно
- *                              ставить несколько запасных cron'ов без риска дублей
+ *                              Перед публикацией бот проверяет, что пост на сегодня
+ *                              уже не выходил: маркер GitHub (артефакт posted-<дата>-bot<N>)
+ *                              и, если у токена хватает прав, стену группы (wall.get).
+ *                              Групповой токен ВК стену читать не может (VK API 27),
+ *                              поэтому маркер GitHub — основная защита. Так в workflow
+ *                              можно ставить несколько запасных cron'ов без риска дублей
  *   node index.js              по расписанию (CRON из .env; на GitHub время задаётся в workflow)
  */
 
@@ -286,6 +289,63 @@ async function findTodayPost(groupId, token) {
   return null;
 }
 
+// --------------------- Маркер «пост сегодня уже выходил» (GitHub) ---------------------
+
+// Групповой токен ВК не имеет права читать стену (wall.get → VK API 27), поэтому
+// «истина о дубле» хранится на стороне GitHub: после успешной публикации бот
+// создаёт файл markers/posted-bot<N>.txt, workflow загружает его как артефакт
+// posted-<дата>-bot<N>, а перед публикацией бот проверяет наличие артефакта
+// через GitHub API (право actions: read). Артефакт живёт 7 дней — достаточно:
+// маркер актуален только внутри суток. Локально (нет GH_TOKEN/GH_REPO) маркер
+// не используется — там работает прежняя логика со стеной группы.
+
+const GH_TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '';
+const GH_REPO = process.env.GH_REPO || '';
+const MARKERS_DIR = require('path').join(__dirname, 'markers');
+
+/** Сегодняшняя дата по Москве, 'YYYY-MM-DD'. */
+function mskToday() {
+  const MSK_OFFSET_MS = 3 * 60 * 60 * 1000; // Москва = UTC+3, без перехода на летнее время
+  return new Date(Date.now() + MSK_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** Выходил ли уже сегодня пост этого бота (по артефакту-маркеру GitHub)?
+ *  true — да; false — нет; null — проверить не удалось / маркер не настроен. */
+async function postedToday(botIndex) {
+  if (!GH_TOKEN || !GH_REPO) return null;
+  const name = `posted-${mskToday()}-bot${botIndex}`;
+  const url = `https://api.github.com/repos/${GH_REPO}/actions/artifacts`
+    + `?name=${encodeURIComponent(name)}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${GH_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return (json.artifacts || []).some((a) => !a.expired);
+  } catch {
+    return null;
+  }
+}
+
+/** Создаёт файл-маркер для загрузки workflow (после успешной публикации). */
+function writeMarkerFile(botIndex) {
+  if (!GH_TOKEN || !GH_REPO) return; // локальный запуск — workflow нет, маркер не нужен
+  const fs = require('fs');
+  const path = require('path');
+  try {
+    fs.mkdirSync(MARKERS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(MARKERS_DIR, `posted-bot${botIndex}.txt`), mskToday() + '\n');
+  } catch (err) {
+    console.warn(`⚠️ Бот ${botIndex}: не удалось создать файл-маркер (${err.message}) — ` +
+      'страховочные запуски не увидят, что пост уже вышел');
+  }
+}
+
 // ----------------------------- Конфигурация ботов -----------------------------
 
 /** Собирает список ботов из переменных окружения: бот 1 — без суффикса, бот 2-5 — с _2.._5. */
@@ -298,6 +358,7 @@ function collectBots() {
     if (!token || !groupId) continue;
     bots.push({
       label: `Бот ${n}`,
+      index: n,
       token,
       groupId,
       city: process.env['CITY' + sfx] || 'Москва',
@@ -310,9 +371,12 @@ function collectBots() {
 
 /** Прогоняет всех ботов. mode: 'test' — только показать,
  *  'now' — опубликовать сразу, 'scheduled' — отложить до POST_TIME_MSK.
- *  В режиме 'scheduled' перед публикацией проверяется стена группы:
- *  если пост на сегодня уже создан/вышел — бот пропускается (защита от дублей). */
-async function runAll(mode) {
+ *  force=true (с режимом 'now' или 'scheduled') пропускает проверку дублей.
+ *  Защита от дублей (запасные cron'ы, задержанные запуски GitHub): бот проверяет
+ *  маркер GitHub «пост сегодня уже выходил» (основная защита — работает и с
+ *  групповым токеном ВК, который не может читать стену), а в режиме 'scheduled'
+ *  дополнительно саму стену группы (wall.get), если у токена хватает прав. */
+async function runAll(mode, force) {
   const bots = collectBots();
   if (!bots.length) {
     throw new Error('Не настроен ни один бот: нужны VK_TOKEN и VK_GROUP_ID (.env или Secrets)');
@@ -327,23 +391,40 @@ async function runAll(mode) {
   let hadError = false;
   for (const bot of bots) {
     try {
-      // Защита от дублей для запусков по расписанию (включая запасные cron'ы):
-      // если пост на сегодня уже есть или запланирован — этот бот пропускается
-      if (mode === 'scheduled') {
-        let existing = null;
-        try {
-          existing = await findTodayPost(bot.groupId, bot.token);
-        } catch (err) {
-          console.warn(`⚠️ ${bot.label}: не удалось проверить стену группы ` +
-            `(${err.message}) — публикую без проверки на дубль`);
-        }
-        if (existing) {
-          const when = existing.kind === 'postponed'
-            ? 'отложенный пост на сегодня уже создан'
-            : 'сегодняшний пост уже опубликован';
-          console.log(`⏭ ${bot.label} (${bot.city}, группа ${bot.groupId}): ` +
-            `${when} (id ${existing.postId}) — этот запуск пропущен`);
+      // Защита от дублей: если пост на сегодня уже есть или запланирован —
+      // этот бот пропускается
+      if (!force && mode !== 'test') {
+        // 1) Маркер GitHub: артефакт posted-<дата>-bot<N> (работает всегда,
+        //    в том числе с групповым токеном ВК)
+        const marked = await postedToday(bot.index);
+        if (marked) {
+          console.log(`⏭ ${bot.label} (${bot.city}, группа ${bot.groupId}): пост на сегодня ` +
+            `уже опубликован (маркер GitHub) — этот запуск пропущен`);
           continue;
+        }
+        if (marked === null && GH_TOKEN && GH_REPO) {
+          console.warn(`⚠️ ${bot.label}: не удалось проверить маркер GitHub — ` +
+            'публикую без защиты от дубля');
+        }
+        // 2) Стена группы (только в режиме расписания; групповому токену ВК
+        //    метод недоступен — VK API 27, это не ошибка)
+        if (mode === 'scheduled') {
+          let existing = null;
+          try {
+            existing = await findTodayPost(bot.groupId, bot.token);
+          } catch (err) {
+            if (!/VK API 27/.test(err.message)) {
+              console.warn(`⚠️ ${bot.label}: не удалось проверить стену группы (${err.message})`);
+            }
+          }
+          if (existing) {
+            const when = existing.kind === 'postponed'
+              ? 'отложенный пост на сегодня уже создан'
+              : 'сегодняшний пост уже опубликован';
+            console.log(`⏭ ${bot.label} (${bot.city}, группа ${bot.groupId}): ` +
+              `${when} (id ${existing.postId}) — этот запуск пропущен`);
+            continue;
+          }
         }
       }
       const message = await buildPostForBot(bot);
@@ -353,6 +434,7 @@ async function runAll(mode) {
         console.log();
       } else {
         const postId = await postToVk(message, bot.groupId, bot.token, defer ? defer.unix : null);
+        writeMarkerFile(bot.index); // workflow загрузит артефакт-маркер «пост вышел»
         const when = defer
           ? `пост выйдет в ленту в ${defer.label} МСК (отложен, id ${postId})`
           : `пост опубликован (id ${postId})`;
@@ -370,17 +452,18 @@ async function runAll(mode) {
 
 async function main() {
   const mode = process.argv[2] || '';
+  const force = process.argv.includes('--force'); // с --now/--scheduled: без проверки дублей
 
   if (mode === '--test') {
     return runAll('test');
   }
 
   if (mode === '--now') {
-    return runAll('now');
+    return runAll('now', force);
   }
 
   if (mode === '--scheduled') {
-    return runAll('scheduled');
+    return runAll('scheduled', force);
   }
 
   // Режим расписания

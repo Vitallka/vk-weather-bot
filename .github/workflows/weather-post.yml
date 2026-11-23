@@ -6,9 +6,13 @@ name: Погода на завтра — автопостинг
 # Расписание — «best effort»: GitHub Actions может не только задержать, но и
 # совсем потерять запуск (так было 20–21.11.2026: планировщик GitHub не
 # зарегистрировал cron, event=schedule — 0 запусков). Поэтому запусков четыре:
-# основной + три страховки. Дублей не будет: бот перед публикацией проверяет
-# стену группы (wall.get) и пропускает запуск, если пост на сегодня уже
-# создан или вышел (см. findTodayPost в bot/index.js).
+# основной + три страховки. Дублей не будет: после успешной публикации этот же
+# workflow загружает артефакт-маркер posted-<дата>-bot<N> (файл создаёт бот),
+# а перед публикацией бот проверяет наличие маркера через GitHub API. Если у
+# токена хватает прав, дополнительно проверяется и стена группы (wall.get) —
+# но групповому токену ВК этот метод недоступен (VK API 27), поэтому маркер —
+# основная защита. Артефакты-маркеры живут 7 дней и видны во вкладке Actions
+# → Artifacts.
 #
 #   14:15 МСК — основной запуск: создаёт ОТЛОЖЕННЫЙ пост (publish_date),
 #               который ВКонтакте публикует ровно в 19:00 МСК;
@@ -19,7 +23,7 @@ name: Погода на завтра — автопостинг
 # Если GitHub-планировщик не регистрирует cron (см. выше), ежедневный запуск
 # можно поручить внешнему сервису (например, cron-job.org): он дёргает
 # workflow_dispatch API с inputs mode=scheduled — сработает ветка --scheduled
-# (отложенный пост к 19:00 МСК, проверка стены от дублей).
+# (отложенный пост к 19:00 МСК, дубли исключены маркером-артефактом).
 # Cron стоит не в начале часа — тогда у GitHub Actions самые большие очереди.
 #
 # Логика запуска (bot/index.js --scheduled):
@@ -48,9 +52,15 @@ on:
           - post
           - test
           - scheduled
+      force:
+        description: "Опубликовать, даже если пост сегодня уже выходил (пропустить проверку дублей)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+  actions: read   # чтение артефактов-маркеров «пост сегодня уже выходил»
 
 jobs:
   post-weather:
@@ -93,18 +103,67 @@ jobs:
           VK_TOKEN_5: ${{ secrets.VK_TOKEN_5 }}
           VK_GROUP_ID_5: ${{ secrets.VK_GROUP_ID_5 }}
           CITY_5: ${{ secrets.CITY_5 }}
+          # Для маркера «пост сегодня уже выходил»: проверка артефактов и дата загрузки
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then FORCE_FLAG="--force"; fi
           if [ "${{ github.event.inputs.mode }}" = "test" ]; then
             echo "=== ТЕСТ (без публикации) ==="
             node index.js --test
           elif [ "${{ github.event.inputs.mode }}" = "post" ]; then
             # Ручной запуск — опубликовать сразу
-            node index.js --now
+            node index.js --now $FORCE_FLAG
           elif [ "${{ github.event.inputs.mode }}" = "scheduled" ]; then
             # Запуск от внешнего планировщика (cron-job.org и т.п.):
             # как по расписанию — отложенный пост к 19:00 МСК, дубли исключены
-            node index.js --scheduled
+            node index.js --scheduled $FORCE_FLAG
           else
             # Запуск по расписанию — отложенный пост, выйдет в 19:00 МСК
-            node index.js --scheduled
+            node index.js --scheduled $FORCE_FLAG
           fi
+
+      # Дата (по Москве) для имён артефактов-маркеров — та же функция, что в боте
+      - name: Дата маркера (по Москве)
+        if: always()
+        run: echo "TODAY_MSK=$(TZ=Europe/Moscow date +%F)" >> "$GITHUB_ENV"
+
+      # Артефакт-маркер «пост сегодня уже выходил»: бот создаёт файл после
+      # успешной публикации, workflow загружает его. Каждый шаг грузит артефакт
+      # только если файл этого бота существует (bot/index.js → writeMarkerFile).
+      - name: Маркер «пост вышел» — бот 1
+        if: always() && hashFiles('bot/markers/posted-bot1.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-${{ env.TODAY_MSK }}-bot1
+          path: bot/markers/posted-bot1.txt
+          retention-days: 7
+      - name: Маркер «пост вышел» — бот 2
+        if: always() && hashFiles('bot/markers/posted-bot2.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-${{ env.TODAY_MSK }}-bot2
+          path: bot/markers/posted-bot2.txt
+          retention-days: 7
+      - name: Маркер «пост вышел» — бот 3
+        if: always() && hashFiles('bot/markers/posted-bot3.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-${{ env.TODAY_MSK }}-bot3
+          path: bot/markers/posted-bot3.txt
+          retention-days: 7
+      - name: Маркер «пост вышел» — бот 4
+        if: always() && hashFiles('bot/markers/posted-bot4.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-${{ env.TODAY_MSK }}-bot4
+          path: bot/markers/posted-bot4.txt
+          retention-days: 7
+      - name: Маркер «пост вышел» — бот 5
+        if: always() && hashFiles('bot/markers/posted-bot5.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-${{ env.TODAY_MSK }}-bot5
+          path: bot/markers/posted-bot5.txt
+          retention-days: 7
