@@ -1,0 +1,44 @@
+name: probe-token-perms
+
+# Временный пробник: может ли GITHUB_TOKEN (actions: write) создавать,
+# читать, обновлять и удалять переменные репозитория, и может ли он
+# читать список артефактов (actions: read). Результат — в логе запуска.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Variables CRUD
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          api="https://api.github.com/repos/$GH_REPO/actions/variables"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+          echo "--- DELETE (убрать мусор, если остался) ---"
+          curl -s -o /dev/null -w "DELETE %{http_code}\n" -X DELETE "${auth[@]}" "$api/PROBE_VAR" || true
+          echo "--- POST create PROBE_VAR=1 ---"
+          curl -s -w "\nPOST %{http_code}\n" -X POST "${auth[@]}" "$api" -d '{"name":"PROBE_VAR","value":"1"}'
+          echo "--- GET PROBE_VAR ---"
+          curl -s -w "\nGET %{http_code}\n" "${auth[@]}" "$api/PROBE_VAR"
+          echo "--- PATCH PROBE_VAR=2 ---"
+          curl -s -o /dev/null -w "PATCH %{http_code}\n" -X PATCH "${auth[@]}" "$api/PROBE_VAR" -d '{"value":"2"}'
+          echo "--- GET again ---"
+          curl -s -w "\nGET %{http_code}\n" "${auth[@]}" "$api/PROBE_VAR"
+          echo "--- DELETE PROBE_VAR ---"
+          curl -s -o /dev/null -w "DELETE %{http_code}\n" -X DELETE "${auth[@]}" "$api/PROBE_VAR"
+
+      - name: Artifacts list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+          echo "--- GET artifacts?name=probe-nothing ---"
+          curl -s -w "\nGET %{http_code}\n" "${auth[@]}" "https://api.github.com/repos/$GH_REPO/actions/artifacts?name=probe-nothing" | head -c 500
