@@ -76,9 +76,14 @@ async function fetchForecast(lat, lon) {
       'weather_code',
       'temperature_2m_max',
       'temperature_2m_min',
+      'apparent_temperature_max',
+      'apparent_temperature_min',
       'precipitation_sum',
+      'precipitation_hours',
       'precipitation_probability_max',
       'wind_speed_10m_max',
+      'wind_gusts_10m_max',
+      'snowfall_sum',
       'uv_index_max',
       'sunrise',
       'sunset',
@@ -162,26 +167,38 @@ function buildMessage(place, daily, i) {
     lines.push(`🌅 Рассвет ${sunrise}, закат ${sunset}`);
   }
 
-  // Советы по погоде: совпавшие правила дописываются в конец поста одной строкой.
+  // Советы по погоде. Правила идут по убыванию важности — в пост попадают
+  // максимум три сработавших. Пороги — как в крупных погодных сервисах:
+  // мороз и жара по «ощущается как» (apparent temperature), шторм по порывам
+  // ≥ 25 м/с (критерий «очень сильного ветра» Росгидромета), снег в сантиметрах.
   // Пороги и тексты можно менять, новые правила — новой строкой if.
   const code = daily.weather_code[i];
   const mm = Number(precip.replace(',', '.'));
   const uv = daily.uv_index_max ? (daily.uv_index_max[i] || 0) : 0;
-  const SNOW = [71, 73, 75, 77, 85, 86]; // снег и снежные ливни (коды WMO)
-  const STORM = [95, 96, 99];            // грозы (коды WMO)
+  const feelsMin = daily.apparent_temperature_min ? Math.round(daily.apparent_temperature_min[i]) : tMin;
+  const feelsMax = daily.apparent_temperature_max ? Math.round(daily.apparent_temperature_max[i]) : tMax;
+  const snowCm = daily.snowfall_sum ? Math.round(daily.snowfall_sum[i] || 0) : 0;
+  const gusts = daily.wind_gusts_10m_max ? Math.round(daily.wind_gusts_10m_max[i] || 0) : wind;
+  const wetHours = daily.precipitation_hours ? Math.round(daily.precipitation_hours[i] || 0) : 0;
+  const STORM = [95, 96, 99]; // грозы (коды WMO)
+  const FOG = [45, 48];       // туман и изморозь (коды WMO)
   const advice = [];
-  if (prob >= 60 || mm >= 2) advice.push('Возьмите зонт ☔');
   if (STORM.includes(code)) advice.push('Возможна гроза — лучше переждать в помещении ⛈');
-  if (tMin <= -15) advice.push('Одевайтесь теплее, сильный мороз 🧣');
+  if (gusts >= 25) advice.push(`Порывы ветра до ${gusts} м/с — по возможности останьтесь дома 🌀`);
+  if (snowCm >= 5 && wind >= 15) advice.push('Возможна метель — видимость плохая, возможны заносы 🌨');
   if (tMin > -5 && tMin <= 1 && (mm > 0 || prob >= 50)) advice.push('Возможен гололёд — будьте осторожны 🧊');
-  if (SNOW.includes(code) && mm >= 2) advice.push('Ожидается снегопад — возможны заносы 🌨');
-  if (tMax >= 28) advice.push('Жарко — пейте больше воды 💧');
-  if (tMax >= 33) advice.push('Аномальная жара — берегитесь солнца 🥵');
+  if (feelsMin <= -15) advice.push(`Одевайтесь теплее: с ветром ощущается как ${fmtTemp(feelsMin)} 🧣`);
+  if (snowCm >= 2) advice.push(`Ожидается снег, до ${snowCm} см 🌨`);
+  if (gusts < 25 && wind >= 15) advice.push('Будет сильный ветер 🌬');
+  if (prob >= 60 || mm >= 2) {
+    advice.push(wetHours >= 10 ? 'Дождь почти весь день — без зонта никуда ☔' : 'Возьмите зонт ☔');
+  }
+  if (FOG.includes(code)) advice.push('Возможен туман — будьте внимательны на дорогах 🌫');
+  if (feelsMax >= 28) advice.push('Жарко — пейте больше воды 💧');
+  if (feelsMax >= 33) advice.push('Аномальная жара — берегитесь солнца 🥵');
   if (uv >= 7) advice.push('Высокая активность солнца — нужен защитный крем 🧴');
-  // ветер — эскалация: при шторме (≥ 25 м/с) обычная фраза не дублируется
-  if (wind >= 25) advice.push('Штормовой ветер — по возможности останьтесь дома 🌀');
-  else if (wind >= 15) advice.push('Будет сильный ветер 🌬');
-  if (advice.length) lines.push('', advice.join('. ') + '.');
+  const top = advice.slice(0, 3);
+  if (top.length) lines.push('', top.join('. ') + '.');
 
   lines.push('', '#погода #' + place.name.replace(/\s+/g, '_'));
   return lines.join('\n');

@@ -17,6 +17,9 @@ const todayStr = new Date(Date.now() + MSK).toISOString().slice(0, 10);
 let scenario = 'empty'; // 'empty' | 'postponed' | 'published'
 // Сценарии маркера GitHub: true — артефакт есть, false — нет
 let ghMarker = false;
+// Сценарий погоды: true — «дикий» завтрашний день (порывы 27 м/с, метель,
+// гололёд, мороз, снег, УФ) для проверки приоритетов и лимита топ-3
+let wildTomorrow = false;
 
 const realFetch = global.fetch;
 
@@ -65,12 +68,17 @@ global.fetch = async (url, opts) => {
       json: async () => ({
         daily: {
           time: [today, day],
-          weather_code: [0, 2],
+          weather_code: [0, wildTomorrow ? 73 : 2],
           temperature_2m_max: [5, 6],
           temperature_2m_min: [-1, 0],
+          apparent_temperature_max: [4, 6],
+          apparent_temperature_min: [-2, wildTomorrow ? -16 : -1],
           precipitation_sum: [0, 0.5],
+          precipitation_hours: [0, 2],
           precipitation_probability_max: [10, 40],
-          wind_speed_10m_max: [3, 4],
+          wind_speed_10m_max: [3, wildTomorrow ? 17 : 4],
+          wind_gusts_10m_max: [5, wildTomorrow ? 27 : 6],
+          snowfall_sum: [0, wildTomorrow ? 6 : 0.5],
           uv_index_max: [2, 8],
           sunrise: [day + 'T08:00', day + 'T08:00'],
           sunset: [day + 'T17:00', day + 'T17:00'],
@@ -120,6 +128,19 @@ async function run() {
   if (Math.abs(Number(wallPostArgs.publish_date) - today19) > 60) throw new Error('FAIL: ночной запуск: publish_date != 19:00 МСК');
   console.log('>>> OK: ночной запуск создал отложенный пост на 19:00 МСК');
   FIXED_NOW = NOW_1415;
+
+  // 1c. «Дикий» день: порывы 27 м/с, метель, гололёд, мороз, снег, УФ —
+  //     в пост должны попасть только ТРИ самых важных совета
+  wallPostCalls = [];
+  wildTomorrow = true;
+  await run();
+  if (wallPostCalls.length !== 1) throw new Error('FAIL: «дикий» день не создал пост (вызовов ' + wallPostCalls.length + ')');
+  if (!/Порывы ветра до 27 м\/с/.test(wallPostArgs.message)) throw new Error('FAIL: нет совета про порывы 27 м/с');
+  if (!/метель/.test(wallPostArgs.message)) throw new Error('FAIL: нет совета про метель');
+  if (!/гололёд/.test(wallPostArgs.message)) throw new Error('FAIL: нет совета про гололёд');
+  if (/защитный крем|до 6 см|ощущается как/.test(wallPostArgs.message)) throw new Error('FAIL: в пост пробились советы за пределами топ-3');
+  console.log('>>> OK: в «дикий» день в посте только топ-3 совета (порывы, метель, гололёд)');
+  wildTomorrow = false;
 
   // 2. Уже есть отложенный пост на сегодня → запуск должен пропуститься
   wallPostCalls = [];
