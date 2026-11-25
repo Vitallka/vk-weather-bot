@@ -71,6 +71,7 @@ global.fetch = async (url, opts) => {
           precipitation_sum: [0, 0.5],
           precipitation_probability_max: [10, 40],
           wind_speed_10m_max: [3, 4],
+          uv_index_max: [2, 8],
           sunrise: [day + 'T08:00', day + 'T08:00'],
           sunset: [day + 'T17:00', day + 'T17:00'],
         },
@@ -105,7 +106,9 @@ async function run() {
   if (wallPostCalls.length !== 1) throw new Error('FAIL: ожидался 1 вызов wall.post, было ' + wallPostCalls.length);
   if (!wallPostArgs.publish_date) throw new Error('FAIL: publish_date не передан');
   if (Math.abs(Number(wallPostArgs.publish_date) - today19) > 60) throw new Error('FAIL: publish_date != 19:00 МСК');
-  console.log('>>> OK: создан отложенный пост на 19:00 МСК (publish_date=' + wallPostArgs.publish_date + ')');
+  if (!/гололёд/.test(wallPostArgs.message)) throw new Error('FAIL: в посте нет совета про гололёд');
+  if (!/защитный крем/.test(wallPostArgs.message)) throw new Error('FAIL: в посте нет совета про УФ-индекс');
+  console.log('>>> OK: создан отложенный пост на 19:00 МСК, новые советы (гололёд, УФ) в тексте');
 
   // 1b. НОЧНОЙ запуск (02:05 МСК — так прилетают запуски при задержке schedule
   //     на 5–14 ч) тоже должен создать ОТЛОЖЕННЫЙ пост на сегодня 19:00 (окно 24 ч)

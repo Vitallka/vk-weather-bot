@@ -79,6 +79,7 @@ async function fetchForecast(lat, lon) {
       'precipitation_sum',
       'precipitation_probability_max',
       'wind_speed_10m_max',
+      'uv_index_max',
       'sunrise',
       'sunset',
     ].join(','),
@@ -161,12 +162,25 @@ function buildMessage(place, daily, i) {
     lines.push(`🌅 Рассвет ${sunrise}, закат ${sunset}`);
   }
 
-  // Небольшой совет по погоде
+  // Советы по погоде: совпавшие правила дописываются в конец поста одной строкой.
+  // Пороги и тексты можно менять, новые правила — новой строкой if.
+  const code = daily.weather_code[i];
+  const mm = Number(precip.replace(',', '.'));
+  const uv = daily.uv_index_max ? (daily.uv_index_max[i] || 0) : 0;
+  const SNOW = [71, 73, 75, 77, 85, 86]; // снег и снежные ливни (коды WMO)
+  const STORM = [95, 96, 99];            // грозы (коды WMO)
   const advice = [];
-  if (prob >= 60 || Number(precip.replace(',', '.')) >= 2) advice.push('Возьмите зонт ☔');
+  if (prob >= 60 || mm >= 2) advice.push('Возьмите зонт ☔');
+  if (STORM.includes(code)) advice.push('Возможна гроза — лучше переждать в помещении ⛈');
   if (tMin <= -15) advice.push('Одевайтесь теплее, сильный мороз 🧣');
+  if (tMin > -5 && tMin <= 1 && (mm > 0 || prob >= 50)) advice.push('Возможен гололёд — будьте осторожны 🧊');
+  if (SNOW.includes(code) && mm >= 2) advice.push('Ожидается снегопад — возможны заносы 🌨');
   if (tMax >= 28) advice.push('Жарко — пейте больше воды 💧');
-  if (wind >= 15) advice.push('Будет сильный ветер 🌬');
+  if (tMax >= 33) advice.push('Аномальная жара — берегитесь солнца 🥵');
+  if (uv >= 7) advice.push('Высокая активность солнца — нужен защитный крем 🧴');
+  // ветер — эскалация: при шторме (≥ 25 м/с) обычная фраза не дублируется
+  if (wind >= 25) advice.push('Штормовой ветер — по возможности останьтесь дома 🌀');
+  else if (wind >= 15) advice.push('Будет сильный ветер 🌬');
   if (advice.length) lines.push('', advice.join('. ') + '.');
 
   lines.push('', '#погода #' + place.name.replace(/\s+/g, '_'));
