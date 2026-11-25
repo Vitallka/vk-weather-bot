@@ -52,11 +52,17 @@ on:
           - post
           - test
           - scheduled
+          - refresh
       force:
         description: "Опубликовать, даже если пост сегодня уже выходил (пропустить проверку дублей)"
         required: false
         default: false
         type: boolean
+      post_ids:
+        description: "refresh: ID отложенных постов через запятую, по порядку ботов (из лога запуска, который их создал)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -125,6 +131,10 @@ jobs:
             # Запуск от внешнего планировщика (cron-job.org и т.п.):
             # как по расписанию — отложенный пост к 19:00 МСК, дубли исключены
             node index.js --scheduled $FORCE_FLAG
+          elif [ "${{ github.event.inputs.mode }}" = "refresh" ]; then
+            # Обновить УЖЕ созданные отложенные посты: текст пересоберётся
+            # с текущим прогнозом, время выхода (POST_TIME) не изменится
+            node index.js --refresh --post-ids="${{ github.event.inputs.post_ids }}"
           else
             # Запуск по расписанию — отложенный пост, выйдет в 19:00 МСК
             node index.js --scheduled $FORCE_FLAG

@@ -20,6 +20,10 @@ let ghMarker = false;
 // Сценарий погоды: true — «дикий» завтрашний день (порывы 27 м/с, метель,
 // гололёд, мороз, снег, УФ) для проверки приоритетов и лимита топ-3
 let wildTomorrow = false;
+// Сценарий refresh: true — wall.edit возвращает ошибку (проверка фолбэка delete+post)
+let editFails = false;
+let wallEditArgs = null;
+let wallDeleteCalls = [];
 
 const realFetch = global.fetch;
 
@@ -51,6 +55,19 @@ global.fetch = async (url, opts) => {
       ? [{ id: 200, date: today19 - 3600, text: '☀️ Погода на завтра — Москва... #погода #Москва' }]
       : [];
     return { ok: true, json: async () => ({ response: { items } }) };
+  }
+  if (u.includes('wall.edit')) {
+    wallEditArgs = Object.fromEntries(new URLSearchParams(opts.body));
+    return {
+      ok: true,
+      json: async () => editFails
+        ? { error: { error_code: 27, error_msg: 'Group authorization failed' } }
+        : { response: { post_id: Number(wallEditArgs.post_id), success: 1 } },
+    };
+  }
+  if (u.includes('wall.delete')) {
+    wallDeleteCalls.push(Object.fromEntries(new URLSearchParams(opts.body)));
+    return { ok: true, json: async () => ({ response: 1 }) };
   }
   if (u.includes('wall.post')) {
     wallPostArgs = Object.fromEntries(new URLSearchParams(opts.body));
@@ -195,6 +212,31 @@ async function run() {
   if (wallPostArgs.publish_date) throw new Error('FAIL: после 19:00 пост должен выйти сразу, без publish_date');
   console.log('>>> OK: запуск после 19:00 публикует пост сразу');
   FIXED_NOW = NOW_1415;
+
+  // 8. --refresh до 19:00: правит уже отложенный пост (id 111) через wall.edit,
+  //    publish_date остаётся 19:00, текст пересобирается с новыми советами
+  wallPostCalls = [];
+  wallDeleteCalls = [];
+  process.argv = [process.argv[0], path.join(__dirname, 'index.js'), '--refresh', '--post-ids=111,222'];
+  await run();
+  if (!wallEditArgs || Number(wallEditArgs.post_id) !== 111) throw new Error('FAIL: wall.edit не вызван для поста 111');
+  if (Math.abs(Number(wallEditArgs.publish_date) - today19) > 60) throw new Error('FAIL: wall.edit: publish_date != 19:00 МСК');
+  if (!/гололёд/.test(wallEditArgs.message)) throw new Error('FAIL: wall.edit: в тексте нет обновлённого совета');
+  if (wallPostCalls.length !== 0) throw new Error('FAIL: при успешном wall.edit не должно быть новой публикации');
+  if (wallDeleteCalls.length !== 0) throw new Error('FAIL: при успешном wall.edit не должно быть удаления');
+  console.log('>>> OK: --refresh обновил отложенный пост через wall.edit');
+
+  // 8b. Если wall.edit недоступен (VK API 27) — пост удаляется и создаётся заново
+  wallPostCalls = [];
+  wallDeleteCalls = [];
+  editFails = true;
+  await run();
+  if (wallDeleteCalls.length !== 1 || Number(wallDeleteCalls[0].post_id) !== 111) throw new Error('FAIL: wall.delete не вызван при недоступном wall.edit');
+  if (wallPostCalls.length !== 1) throw new Error('FAIL: не создан новый отложенный пост после удаления');
+  if (!wallPostArgs.publish_date) throw new Error('FAIL: новый пост не отложенный (нет publish_date)');
+  console.log('>>> OK: при недоступном wall.edit пост пересоздан (delete + post)');
+  editFails = false;
+  process.argv = [process.argv[0], path.join(__dirname, 'index.js'), '--scheduled'];
 
   // уборка
   fs.rmSync(path.join(__dirname, 'markers'), { recursive: true, force: true });

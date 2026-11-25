@@ -13,6 +13,11 @@
  *   node index.js --scheduled  пост по расписанию GitHub: до POST_TIME (19:00 МСК) —
  *                              отложенный пост ровно на 19:00 (в том числе при ночном
  *                              запуске); после 19:00 — публикация сразу.
+ *   node index.js --refresh --post-ids=123,456
+ *                              пересобрать УЖЕ созданные отложенные посты (ID через
+ *                              запятую по порядку ботов): текст собирается заново, а
+ *                              время выхода остаётся прежним. Правит через wall.edit,
+ *                              если недоступно — удаляет и создаёт отложенный заново.
  *                              Перед публикацией бот проверяет, что пост на сегодня
  *                              уже не выходил: маркер GitHub (артефакт posted-<дата>-bot<N>)
  *                              и, если у токена хватает прав, стену группы (wall.get).
@@ -274,6 +279,37 @@ async function postToVk(message, groupId, token, publishDate) {
   return json.response.post_id;
 }
 
+/** Правит запись на стене (в том числе отложенную).
+ * publishDate — необязательное время отложенной публикации (Unix). */
+async function editVkPost(message, groupId, token, postId, publishDate) {
+  const body = new URLSearchParams({
+    owner_id: groupOwnerId(groupId),
+    post_id: String(postId),
+    message,
+    v: VK_API_VERSION,
+    access_token: token,
+  });
+  if (publishDate) body.set('publish_date', String(publishDate));
+  const res = await fetch('https://api.vk.com/method/wall.edit', { method: 'POST', body });
+  const json = await res.json();
+  if (json.error) throw new Error(`Ошибка VK API ${json.error.error_code}: ${json.error.error_msg}`);
+  return json.response;
+}
+
+/** Удаляет запись со стены. */
+async function deleteVkPost(groupId, token, postId) {
+  const body = new URLSearchParams({
+    owner_id: groupOwnerId(groupId),
+    post_id: String(postId),
+    v: VK_API_VERSION,
+    access_token: token,
+  });
+  const res = await fetch('https://api.vk.com/method/wall.delete', { method: 'POST', body });
+  const json = await res.json();
+  if (json.error) throw new Error(`Ошибка VK API ${json.error.error_code}: ${json.error.error_msg}`);
+  return json.response;
+}
+
 /** Возвращает записи со стены группы.
  * filter: 'postponed' — отложенные записи, 'owner' — опубликованные владельцем. */
 async function getWallPosts(groupId, token, filter, count = 20) {
@@ -479,6 +515,57 @@ async function runAll(mode, force) {
   if (hadError) process.exitCode = 1;
 }
 
+/** Режим --refresh: пересобирает УЖЕ созданные отложенные посты с актуальным
+ *  прогнозом и текстами (например, после их смены). ID постов передаются
+ *  через --post-ids=id1,id2 по порядку ботов. Пытается править запись через
+ *  wall.edit с прежним publish_date, а если групповому токену это недоступно —
+ *  удаляет и создаёт отложенный заново. Работает только до POST_TIME. */
+async function runRefresh(postIds) {
+  const bots = collectBots();
+  if (!bots.length) {
+    throw new Error('Не настроен ни один бот: нужны VK_TOKEN и VK_GROUP_ID (.env или Secrets)');
+  }
+  const plan = computePublishPlan();
+  if (plan.action !== 'defer') {
+    console.log(`⏭ Обновление отложки пропущено: сейчас план «${plan.action}» — ` +
+      `обновлять отложенный пост имеет смысл только до ${POST_TIME_MSK} МСК`);
+    return;
+  }
+  let hadError = false;
+  for (const bot of bots) {
+    const postId = postIds[bot.index - 1];
+    try {
+      if (!postId) {
+        console.log(`⏭ ${bot.label} (${bot.city}, группа ${bot.groupId}): ` +
+          'ID отложенного поста не передан — пропущено');
+        continue;
+      }
+      const message = await buildPostForBot(bot);
+      let ok = false;
+      try {
+        await editVkPost(message, bot.groupId, bot.token, postId, plan.unix);
+        ok = true;
+        console.log(`✅ ${bot.label} (${bot.city}, группа ${bot.groupId}): отложенный пост ` +
+          `id ${postId} обновлён (выйдет в ${plan.label} МСК)`);
+      } catch (err) {
+        console.warn(`⚠️ ${bot.label}: wall.edit не сработал (${err.message}) — ` +
+          'удаляю и создаю отложенный заново');
+      }
+      if (!ok) {
+        await deleteVkPost(bot.groupId, bot.token, postId);
+        const newId = await postToVk(message, bot.groupId, bot.token, plan.unix);
+        writeMarkerFile(bot.index);
+        console.log(`✅ ${bot.label} (${bot.city}, группа ${bot.groupId}): отложенный пост ` +
+          `пересоздан (id ${newId}, выйдет в ${plan.label} МСК)`);
+      }
+    } catch (err) {
+      hadError = true;
+      console.error(`❌ ${bot.label} (${bot.city}, группа ${bot.groupId}): ${err.message}`);
+    }
+  }
+  if (hadError) process.exitCode = 1;
+}
+
 // ----------------------------- Запуск -----------------------------
 
 async function main() {
@@ -495,6 +582,14 @@ async function main() {
 
   if (mode === '--scheduled') {
     return runAll('scheduled', force);
+  }
+
+  if (mode === '--refresh') {
+    const idsArg = process.argv.find((a) => a.startsWith('--post-ids='));
+    const postIds = idsArg
+      ? idsArg.slice('--post-ids='.length).split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+    return runRefresh(postIds);
   }
 
   // Режим расписания
