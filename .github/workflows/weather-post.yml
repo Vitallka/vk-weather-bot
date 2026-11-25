@@ -62,6 +62,12 @@ permissions:
   contents: read
   actions: read   # чтение артефактов-маркеров «пост сегодня уже выходил»
 
+# Запуски не выполняются параллельно: два одновременных запуска могут пройти
+# проверку маркера до загрузки артефакта и задублировать пост
+concurrency:
+  group: weather-post
+  cancel-in-progress: false
+
 jobs:
   post-weather:
     runs-on: ubuntu-latest
@@ -70,10 +76,10 @@ jobs:
         working-directory: bot
     steps:
       - name: Получить код
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Установить Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
 
@@ -134,35 +140,35 @@ jobs:
       # только если файл этого бота существует (bot/index.js → writeMarkerFile).
       - name: Маркер «пост вышел» — бот 1
         if: always() && hashFiles('bot/markers/posted-bot1.txt') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: posted-${{ env.TODAY_MSK }}-bot1
           path: bot/markers/posted-bot1.txt
           retention-days: 7
       - name: Маркер «пост вышел» — бот 2
         if: always() && hashFiles('bot/markers/posted-bot2.txt') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: posted-${{ env.TODAY_MSK }}-bot2
           path: bot/markers/posted-bot2.txt
           retention-days: 7
       - name: Маркер «пост вышел» — бот 3
         if: always() && hashFiles('bot/markers/posted-bot3.txt') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: posted-${{ env.TODAY_MSK }}-bot3
           path: bot/markers/posted-bot3.txt
           retention-days: 7
       - name: Маркер «пост вышел» — бот 4
         if: always() && hashFiles('bot/markers/posted-bot4.txt') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: posted-${{ env.TODAY_MSK }}-bot4
           path: bot/markers/posted-bot4.txt
           retention-days: 7
       - name: Маркер «пост вышел» — бот 5
         if: always() && hashFiles('bot/markers/posted-bot5.txt') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: posted-${{ env.TODAY_MSK }}-bot5
           path: bot/markers/posted-bot5.txt
