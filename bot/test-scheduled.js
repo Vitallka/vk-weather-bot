@@ -20,8 +20,11 @@ let ghMarker = false;
 
 const realFetch = global.fetch;
 
-// Фиксируем «сейчас» = сегодня 14:15 МСК, чтобы тест был детерминированным
-const FIXED_NOW = Date.UTC(msk.getUTCFullYear(), msk.getUTCMonth(), msk.getUTCDate(), 11, 15, 0);
+// Фиксируем «сейчас», чтобы тест был детерминированным
+// (по умолчанию — сегодня 14:15 МСК; сценарии ночного/вечернего запуска меняют время)
+const DAY_UTC = Date.UTC(msk.getUTCFullYear(), msk.getUTCMonth(), msk.getUTCDate());
+const NOW_1415 = DAY_UTC + 11 * 3600e3 + 15 * 60e3; // сегодня 14:15 МСК
+let FIXED_NOW = NOW_1415;
 Date.now = () => FIXED_NOW;
 
 global.fetch = async (url, opts) => {
@@ -104,6 +107,17 @@ async function run() {
   if (Math.abs(Number(wallPostArgs.publish_date) - today19) > 60) throw new Error('FAIL: publish_date != 19:00 МСК');
   console.log('>>> OK: создан отложенный пост на 19:00 МСК (publish_date=' + wallPostArgs.publish_date + ')');
 
+  // 1b. НОЧНОЙ запуск (02:05 МСК — так прилетают запуски при задержке schedule
+  //     на 5–14 ч) тоже должен создать ОТЛОЖЕННЫЙ пост на сегодня 19:00 (окно 24 ч)
+  wallPostCalls = [];
+  FIXED_NOW = DAY_UTC - 55 * 60e3; // сегодня 02:05 МСК (23:05 UTC вчера)
+  await run();
+  if (wallPostCalls.length !== 1) throw new Error('FAIL: ночной запуск не создал пост (вызовов ' + wallPostCalls.length + ')');
+  if (!wallPostArgs.publish_date) throw new Error('FAIL: ночной запуск: publish_date не передан');
+  if (Math.abs(Number(wallPostArgs.publish_date) - today19) > 60) throw new Error('FAIL: ночной запуск: publish_date != 19:00 МСК');
+  console.log('>>> OK: ночной запуск создал отложенный пост на 19:00 МСК');
+  FIXED_NOW = NOW_1415;
+
   // 2. Уже есть отложенный пост на сегодня → запуск должен пропуститься
   wallPostCalls = [];
   scenario = 'postponed';
@@ -146,6 +160,17 @@ async function run() {
   await run();
   if (wallPostCalls.length !== 1) throw new Error('FAIL: --force не обошёл проверку дублей!');
   console.log('>>> OK: --force публикует даже при маркере');
+
+  // 7. Запуск после 19:00 (сегодня 21:30 МСК) — пост публикуется СРАЗУ, без publish_date
+  wallPostCalls = [];
+  ghMarker = false;
+  process.argv = [process.argv[0], path.join(__dirname, 'index.js'), '--scheduled'];
+  FIXED_NOW = DAY_UTC + 18.5 * 3600e3; // сегодня 21:30 МСК
+  await run();
+  if (wallPostCalls.length !== 1) throw new Error('FAIL: вечерний запуск не опубликовал пост (вызовов ' + wallPostCalls.length + ')');
+  if (wallPostArgs.publish_date) throw new Error('FAIL: после 19:00 пост должен выйти сразу, без publish_date');
+  console.log('>>> OK: запуск после 19:00 публикует пост сразу');
+  FIXED_NOW = NOW_1415;
 
   // уборка
   fs.rmSync(path.join(__dirname, 'markers'), { recursive: true, force: true });
